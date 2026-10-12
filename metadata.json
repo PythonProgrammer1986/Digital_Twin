@@ -1,0 +1,6 @@
+{
+  "name": "FlexSim Twin - Discrete Event Production Digital Twin",
+  "description": "Interactive discrete event simulation and line balancing optimizer for manufacturing lines with stochastic Monte Carlo analysis, Yamazumi balancing, and live digital twin animation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
