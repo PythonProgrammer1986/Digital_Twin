@@ -19,6 +19,7 @@ import {
   Package,
   Boxes,
   ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface DigitalTwinViewProps {
@@ -103,6 +104,19 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
       }
     });
   });
+
+  // Line Bottleneck Tracking
+  const isSaBottleneck = result.bottleneckStationIndex === -1;
+  const bottleneckStation = !isSaBottleneck ? config.stations[result.bottleneckStationIndex] : null;
+  const bottleneckCycle = isSaBottleneck
+    ? result.subassemblyCycleTime
+    : (result.stationCycleTimes[result.bottleneckStationIndex] || 0);
+  const bottleneckUtil = isSaBottleneck
+    ? (result.stationUtilization.length > 0
+        ? Math.round(result.stationUtilization.reduce((a, b) => a + b, 0) / result.stationUtilization.length)
+        : 85)
+    : (result.stationUtilization[result.bottleneckStationIndex] || 0);
+  const bottleneckOverTakt = bottleneckCycle > result.taktHours;
 
   return (
     <div className="flex flex-col gap-5">
@@ -242,10 +256,69 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
           </div>
         </div>
 
+        {/* BOTTLENECK DIAGNOSTIC BAR ON DIGITAL TWIN SCREEN */}
+        <div className="bg-gradient-to-r from-red-950/80 via-slate-950 to-slate-950 border-b border-red-500/40 px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shadow-inner">
+          <div className="flex items-center gap-3">
+            <div className="px-2.5 py-1 rounded bg-red-600 text-white font-black text-[10px] tracking-wider uppercase flex items-center gap-1.5 shadow animate-pulse">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>SYSTEM BOTTLENECK</span>
+            </div>
+            <div>
+              <span className="font-bold text-slate-100 text-sm">
+                {isSaBottleneck
+                  ? 'Feeder Subassembly Pre-Fabrication Line'
+                  : `Station S${result.bottleneckStationIndex + 1}: ${bottleneckStation?.name}`}
+              </span>
+              <span className="text-slate-300 text-[11px] ml-2">
+                (Cycle Time: <strong className="text-amber-400 font-mono">{bottleneckCycle.toFixed(1)}h</strong> vs Takt: <span className="font-mono text-slate-300">{result.taktHours.toFixed(1)}h</span>
+                {bottleneckOverTakt ? ` · +${(bottleneckCycle - result.taktHours).toFixed(1)}h above takt budget` : ' · Rate-limiting operation'}
+                )
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 text-[11px] font-mono">
+            <div className="flex items-center gap-1.5 text-slate-300">
+              <span className="text-slate-400">Utilization:</span>
+              <span className={`font-bold ${bottleneckUtil > 85 ? 'text-amber-400' : 'text-slate-200'}`}>
+                {bottleneckUtil}%
+              </span>
+            </div>
+            <div className="hidden md:flex items-center gap-1.5 text-slate-300">
+              <span className="text-slate-400">Primary Constraint:</span>
+              <span className="text-slate-200 font-medium truncate max-w-xs">{result.primaryConstraint}</span>
+            </div>
+            <button
+              onClick={onOpenOptimizer}
+              className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm hover:shadow-cyan-500/30"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              Optimize Bottleneck
+            </button>
+          </div>
+        </div>
+
         {/* Floor Interactive Layout Canvas */}
         <div className="p-6 overflow-x-auto space-y-6 min-w-[980px] bg-gradient-to-b from-slate-900 to-slate-950">
           {/* 1. SUBASSEMBLY FEEDER AREA */}
-          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4">
+          <div
+            className={`rounded-xl p-4 transition-all ${
+              isSaBottleneck
+                ? 'bg-slate-950/90 border-2 border-red-500 ring-2 ring-red-500/40 shadow-xl shadow-red-500/10'
+                : 'bg-slate-950/80 border border-slate-800'
+            }`}
+          >
+            {isSaBottleneck && (
+              <div className="mb-3 px-3 py-1.5 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-lg flex items-center justify-between text-xs font-bold animate-pulse shadow">
+                <span className="flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>PRIMARY BOTTLENECK: SUBASSEMBLY FEEDER LINE PACING SYSTEM</span>
+                </span>
+                <span className="font-mono text-[11px] bg-black/40 px-2 py-0.5 rounded">
+                  Cycle: {result.subassemblyCycleTime.toFixed(1)}h &gt; Takt: {result.taktHours.toFixed(1)}h
+                </span>
+              </div>
+            )}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 rounded bg-purple-400" />
@@ -416,15 +489,28 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
                 <React.Fragment key={station.id}>
                   {/* Station Column */}
                   <div
-                    className={`flex-1 min-w-[240px] max-w-[320px] rounded-xl border flex flex-col bg-slate-900 shadow-md ${
+                    className={`flex-1 min-w-[245px] max-w-[325px] rounded-xl border flex flex-col bg-slate-900 shadow-md transition-all ${
                       isBottleneck
-                        ? 'border-amber-500/80 ring-1 ring-amber-500/30'
+                        ? 'border-2 border-red-500 ring-2 ring-red-500/70 shadow-2xl shadow-red-500/20'
                         : 'border-slate-800'
                     }`}
                   >
+                    {/* High-Visibility Bottleneck Alert Header Ribbon */}
+                    {isBottleneck && (
+                      <div className="bg-gradient-to-r from-red-600 to-rose-600 text-white font-black text-[10px] tracking-wider uppercase px-3 py-1 rounded-t-xl flex items-center justify-between shadow animate-pulse">
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>PRIMARY BOTTLENECK</span>
+                        </span>
+                        <span className="font-mono text-[9px] bg-black/40 px-1.5 py-0.5 rounded">
+                          {cycleTime.toFixed(1)}h &gt; {result.taktHours.toFixed(1)}h
+                        </span>
+                      </div>
+                    )}
+
                     {/* Station Header */}
                     <div
-                      className="p-3.5 rounded-t-xl border-b border-slate-800"
+                      className={`p-3.5 ${isBottleneck ? '' : 'rounded-t-xl'} border-b border-slate-800`}
                       style={{
                         background: `linear-gradient(to right, ${station.color}15, rgba(15, 23, 42, 0.6))`,
                       }}
@@ -463,6 +549,19 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
                           </span>
                         </div>
                       </div>
+
+                      {/* Explicit Bottleneck Callout on Station Header */}
+                      {isBottleneck && (
+                        <div className="mt-2 px-2 py-1 rounded bg-red-950/90 border border-red-500/50 text-red-200 text-[10px] font-bold flex items-center justify-between">
+                          <span className="flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-red-400" />
+                            Rate-Limiting Bottleneck
+                          </span>
+                          <span className="font-mono text-amber-300">
+                            {isOverTakt ? `+${(cycleTime - result.taktHours).toFixed(1)}h over takt` : 'Longest CT'}
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Work Bays Area */}

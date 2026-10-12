@@ -68,6 +68,7 @@ export const OptimizerModal: React.FC<OptimizerModalProps> = ({
       stations: recommendation.optimizedStations,
       saStations: recommendation.optimizedSaStations,
       saPeople: recommendation.optimizedSaPeople,
+      ...(recommendation.optimizedSaBuffers ? { saBuffers: recommendation.optimizedSaBuffers } : {}),
       ...Object.values(selectedPatches).reduce((acc, p) => ({ ...acc, ...p }), {}),
       ...(additionalPatch || {}),
     };
@@ -248,6 +249,76 @@ export const OptimizerModal: React.FC<OptimizerModalProps> = ({
                       </strong>
                     </span>
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* OVERTIME & EMERGENCY RECOVERY CATCH-UP PLANNER */}
+          {recommendation.recoveryPlan && (
+            <div className="p-4 bg-gradient-to-r from-purple-950/70 via-slate-900 to-slate-900 border border-purple-500/50 rounded-xl shadow-md space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-purple-500/20 text-purple-300 rounded-lg border border-purple-500/30 shrink-0">
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-purple-200">
+                        Overtime & Emergency Recovery Catch-Up Planner
+                      </h4>
+                      <span className="text-[10px] font-mono font-bold bg-purple-900/60 text-purple-300 border border-purple-700/60 px-1.5 py-0.2 rounded">
+                        Recommended Lever
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 mt-0.5">
+                      Recovers all {config.demand} units before Day {recommendation.workingDaysAvailable} by scheduling focused overtime without hiring extra operators.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() =>
+                    applyRecommendation({
+                      overtimeHoursPerShift:
+                        (config.overtimeHoursPerShift || 0) +
+                        recommendation.recoveryPlan!.overtimeHoursPerShift,
+                      weekendShifts:
+                        (config.weekendShifts || 0) +
+                        recommendation.recoveryPlan!.weekendShifts,
+                    })
+                  }
+                  className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-bold shadow-md transition-all flex items-center gap-1.5 shrink-0 hover:shadow-purple-500/20"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  Apply Recovery Plan Now
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono">
+                <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block text-[10px] uppercase">Daily Overtime</span>
+                  <span className="text-purple-300 font-bold text-sm">
+                    +{recommendation.recoveryPlan.overtimeHoursPerShift} h/shift
+                  </span>
+                </div>
+                <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block text-[10px] uppercase">Weekend Recovery</span>
+                  <span className="text-purple-300 font-bold text-sm">
+                    +{recommendation.recoveryPlan.weekendShifts} shifts
+                  </span>
+                </div>
+                <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block text-[10px] uppercase">Recovered Output</span>
+                  <span className="text-emerald-400 font-bold text-sm">
+                    +{recommendation.recoveryPlan.recoveredUnits} units (100%)
+                  </span>
+                </div>
+                <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block text-[10px] uppercase">Net Recovery Payoff</span>
+                  <span className="text-emerald-400 font-bold text-sm">
+                    +{formatINR(recommendation.recoveryPlan.netRecoveryPayoff)}
+                  </span>
                 </div>
               </div>
             </div>

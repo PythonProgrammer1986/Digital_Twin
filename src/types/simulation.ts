@@ -171,8 +171,10 @@ export interface ParameterRecommendation {
 
 export interface OptimizationRecommendation {
   optimizedStations: Station[];
-  optimizedSaStations: number; // Parallel Subassembly Cells
-  optimizedSaPeople: number;   // Technicians Per SA Cell
+  optimizedSaStations: number; // Parallel Subassembly Cells & concurrent workstations
+  optimizedSaPeople: number;   // Technicians Per SA Cell (minimized)
+  optimizedSaBuffers?: number; // Material Buffers Per SA Cell used for optimization
+  recoveryPlan?: RecoveryPlanResult; // Overtime & Emergency Recovery Catch-Up plan if needed
   targetDemand: number;        // Monthly Target Requirement
   estimatedOutput: number;
   confidenceScore: number;

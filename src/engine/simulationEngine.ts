@@ -12,6 +12,7 @@ import {
   RecoveryPlanResult,
 } from '../types/simulation';
 import { getMonteCarloOneLiner } from '../utils/monteCarloExplanation';
+import { formatINR } from '../utils/currency';
 
 // Deterministic fast PRNG (Mulberry32)
 export class PRNG {
@@ -507,35 +508,60 @@ export function optimizeProductionLine(
     };
   });
 
-  // Optimize Subassembly feeder line: Primary levers are Parallel Subassembly Cells & Technicians Per SA Cell
+  // Optimize Subassembly feeder line:
+  // Technicians Per SA Cell should be as minimum as possible (start with 1 tech/cell).
+  // Use Material Buffers Per SA Cell and Parallel Subassembly Cells (concurrent workstations 1..6) for optimization.
   const totalSubMH = currentConfig.subassemblies.reduce((sum, s) => sum + s.mh, 0);
   let bestSa = {
-    stations: currentConfig.saStations,
-    people: currentConfig.saPeople,
+    stations: Math.max(1, currentConfig.saStations),
+    people: 1, // Minimize technicians per cell
     minLabor: 9999,
   };
   let foundSaFeasible = false;
 
+  // Priority 1: Check 1 technician per cell (saPeople = 1) across parallel workstations (1..6)
   for (let saSt = 1; saSt <= 6; saSt++) {
-    for (let saP = 1; saP <= 8; saP++) {
-      const saCycle = totalSubMH / (saSt * saP * nominalEff);
-      const labor = saSt * saP;
+    const saCycle = totalSubMH / (saSt * 1 * nominalEff);
+    if (saCycle <= targetCycleBudget) {
+      foundSaFeasible = true;
+      bestSa = { stations: saSt, people: 1, minLabor: saSt * 1 };
+      break;
+    }
+  }
+
+  // Priority 2: Only if 1 tech/cell with 6 parallel cells cannot meet cycle budget, test 2 techs/cell
+  if (!foundSaFeasible) {
+    for (let saSt = 1; saSt <= 6; saSt++) {
+      const saCycle = totalSubMH / (saSt * 2 * nominalEff);
       if (saCycle <= targetCycleBudget) {
-        if (!foundSaFeasible || labor < bestSa.minLabor) {
-          foundSaFeasible = true;
-          bestSa = { stations: saSt, people: saP, minLabor: labor };
-        }
+        foundSaFeasible = true;
+        bestSa = { stations: saSt, people: 2, minLabor: saSt * 2 };
+        break;
       }
     }
   }
 
+  // Priority 3: Keep technicians strictly at minimum (fallback to 2, or min between current and 2)
+  if (!foundSaFeasible) {
+    bestSa = {
+      stations: 6,
+      people: Math.min(2, Math.max(1, currentConfig.saPeople)),
+      minLabor: 6 * 2,
+    };
+  }
+
+  // Use Material Buffers Per SA Cell for optimization (2 to 4 buffers to prevent starvation)
+  const optimizedSaBuffers = Math.max(2, Math.min(4, (currentConfig.saBuffers ?? 2) + 1));
+
   // Iterative simulation verification loop:
   // Ensure all demand units are completed BEFORE Working Days Per Month
+  // During optimization only change Operators Assigned & Parallel Subassembly Cells (concurrent workstations)
   let testConfig: SimConfig = {
     ...currentConfig,
     stations: candidateStations,
     saStations: bestSa.stations,
     saPeople: bestSa.people,
+    saBuffers: optimizedSaBuffers,
   };
   let testSim = simulateLine(testConfig);
 
@@ -543,7 +569,8 @@ export function optimizeProductionLine(
     testSim.machines[currentConfig.demand - 1]?.finishTime ||
     (testSim.machines.length > 0 ? testSim.machines[testSim.machines.length - 1].finishTime : 0);
 
-  // If output is not completed within horizon, iteratively increment operators at the most constrained station
+  // If output is not completed within horizon, iteratively increment operators at the most constrained station,
+  // or scale parallel subassembly cells (keeping technicians per SA cell minimized)
   let tuningIterations = 0;
   while (
     (testSim.completedCount < currentConfig.demand || lastUnitFinish > horizon) &&
@@ -569,13 +596,11 @@ export function optimizeProductionLine(
       candidateStations = candidateStations.map((st, idx) =>
         idx === bottleneckIdx ? { ...st, people: st.people + 1 } : st
       );
-    } else if (bestSa.people < 8) {
-      // Station operators are maxed out, check if increasing subassembly techs helps
-      bestSa.people += 1;
     } else if (bestSa.stations < 6) {
+      // Station operators are maxed out, expand parallel concurrent subassembly workstations
       bestSa.stations += 1;
     } else {
-      // Reached physical maximum staffing & cells limits
+      // Reached physical maximum station staffing & parallel cell limits
       break;
     }
 
@@ -584,6 +609,7 @@ export function optimizeProductionLine(
       stations: candidateStations,
       saStations: bestSa.stations,
       saPeople: bestSa.people,
+      saBuffers: optimizedSaBuffers,
     };
     testSim = simulateLine(testConfig);
     lastUnitFinish =
@@ -671,8 +697,40 @@ export function optimizeProductionLine(
   const parameterRecommendations: ParameterRecommendation[] = [];
 
   const deficitHours = Math.max(0, lastUnitFinish - horizon);
+  let recoveryPlan: RecoveryPlanResult | undefined;
 
-  // 1. Working Days Per Month recommendation
+  // 1. PRIMARY LEVER: Overtime & Emergency Recovery Catch-Up Planner
+  // Activated when minimum technicians + operators + parallel cells cannot meet demand before Working Days Per Month
+  if (deficitHours > 0 || !isCompletedBeforeWorkingDays) {
+    const netShiftAvailableHours = Math.max(1, currentConfig.shiftHours * (currentConfig.opePercent / 100));
+    const otHoursNeeded = Math.min(
+      4,
+      Math.max(0.5, Math.ceil((deficitHours / Math.max(1, currentConfig.workingDays * currentConfig.shifts)) * 2) / 2)
+    );
+    const otProvidedHours = otHoursNeeded * currentConfig.workingDays * currentConfig.shifts * (currentConfig.opePercent / 100);
+    const remainingDeficit = Math.max(0, deficitHours - otProvidedHours);
+    const recWeekendShifts = remainingDeficit > 0
+      ? Math.min(8, Math.max(1, Math.ceil(remainingDeficit / netShiftAvailableHours)))
+      : 0;
+
+    recoveryPlan = calculateOvertimeRecovery(testConfig, otHoursNeeded, recWeekendShifts);
+
+    parameterRecommendations.push({
+      id: 'rec-recovery-planner',
+      type: 'overtime',
+      title: 'Overtime & Emergency Recovery Catch-Up Planner',
+      description: `Schedule +${otHoursNeeded}h daily overtime per shift${recWeekendShifts > 0 ? ` and ${recWeekendShifts} emergency Saturday weekend shift(s)` : ''} to recover all deficit trucks without hiring extra staff.`,
+      currentValue: `${currentConfig.overtimeHoursPerShift || 0}h OT · ${currentConfig.weekendShifts || 0} Weekend`,
+      recommendedValue: `+${otHoursNeeded}h OT/shift${recWeekendShifts > 0 ? ` +${recWeekendShifts} Wknd` : ''}`,
+      impactDescription: `Recovers ${recoveryPlan.recoveredUnits} units (+${formatINR(recoveryPlan.recoveredRevenue)} revenue) with ₹${(recoveryPlan.netRecoveryPayoff / 100000).toFixed(1)} Lakhs net recovery payoff after overtime costs, ensuring 100% completion before Day ${workingDaysAvailable}.`,
+      patch: {
+        overtimeHoursPerShift: (currentConfig.overtimeHoursPerShift || 0) + otHoursNeeded,
+        weekendShifts: (currentConfig.weekendShifts || 0) + recWeekendShifts,
+      },
+    });
+  }
+
+  // 2. Working Days Per Month recommendation
   const recWorkingDays = Math.ceil(workingDaysRequired);
   if (recWorkingDays > currentConfig.workingDays) {
     parameterRecommendations.push({
@@ -687,7 +745,7 @@ export function optimizeProductionLine(
     });
   }
 
-  // 2. Operational Shifts recommendation
+  // 3. Operational Shifts recommendation
   if (currentConfig.shifts < 3) {
     const recShifts = (currentConfig.shifts === 1 ? 2 : 3) as 1 | 2 | 3;
     const estDaysWithShifts = (workingDaysRequired * currentConfig.shifts) / recShifts;
@@ -703,46 +761,7 @@ export function optimizeProductionLine(
     });
   }
 
-  // 3. Overtime Hours Per Shift recommendation
-  if (deficitHours > 0 || !isCompletedBeforeWorkingDays) {
-    const otHoursNeeded = Math.min(
-      4,
-      Math.max(0.5, Math.ceil((deficitHours / (currentConfig.workingDays * currentConfig.shifts)) * 10) / 10)
-    );
-    const newOT = (currentConfig.overtimeHoursPerShift || 0) + otHoursNeeded;
-    parameterRecommendations.push({
-      id: 'rec-overtime',
-      type: 'overtime',
-      title: 'Add Overtime Hours Per Shift',
-      description: `Schedule +${otHoursNeeded}h daily overtime per shift across ${currentConfig.workingDays} working days.`,
-      currentValue: `${currentConfig.overtimeHoursPerShift || 0} h/shift`,
-      recommendedValue: `${newOT} h/shift (+${otHoursNeeded}h)`,
-      impactDescription: `Generates ${Math.round(otHoursNeeded * currentConfig.workingDays * currentConfig.shifts)} additional operating hours to bridge the ${deficitHours.toFixed(1)}h deficit without adding new shifts.`,
-      patch: { overtimeHoursPerShift: newOT },
-    });
-  }
-
-  // 4. Weekend Shifts recommendation
-  if (deficitHours > 0 || !isCompletedBeforeWorkingDays) {
-    const netShiftHours = currentConfig.shiftHours * (currentConfig.opePercent / 100);
-    const recWeekendShifts = Math.min(
-      8,
-      Math.max(1, Math.ceil(deficitHours / Math.max(1, netShiftHours)))
-    );
-    const newWeekendShifts = (currentConfig.weekendShifts || 0) + recWeekendShifts;
-    parameterRecommendations.push({
-      id: 'rec-weekend',
-      type: 'weekendShifts',
-      title: 'Schedule Weekend Production Shifts',
-      description: `Run ${recWeekendShifts} Saturday weekend production shifts during the month.`,
-      currentValue: `${currentConfig.weekendShifts || 0} weekend shifts`,
-      recommendedValue: `${newWeekendShifts} weekend shifts (+${recWeekendShifts})`,
-      impactDescription: `Injects ${Math.round(recWeekendShifts * netShiftHours)} operational hours over weekends to complete demand on time.`,
-      patch: { weekendShifts: newWeekendShifts },
-    });
-  }
-
-  // 5. Parallel Assembly Bay at Bottleneck Station
+  // 4. Parallel Assembly Bay at Bottleneck Station
   if (bottleneckStation && (!isCompletedBeforeWorkingDays || bnCycleMax > targetTakt)) {
     parameterRecommendations.push({
       id: 'rec-station-bay',
@@ -760,7 +779,7 @@ export function optimizeProductionLine(
     });
   }
 
-  // 6. Kaizen Work Content Reduction
+  // 5. Kaizen Work Content Reduction
   if (bottleneckStation && (!isCompletedBeforeWorkingDays || bnCycleMax > targetTakt)) {
     const reducedMh = Math.max(1, Math.round(bottleneckStation.mh * 0.75));
     parameterRecommendations.push({
@@ -779,7 +798,7 @@ export function optimizeProductionLine(
     });
   }
 
-  // 7. Improve Plant OPE
+  // 6. Improve Plant OPE
   if (currentConfig.opePercent < 95 && (!isCompletedBeforeWorkingDays || deficitHours > 0)) {
     const recOpe = Math.min(
       96,
@@ -818,14 +837,14 @@ export function optimizeProductionLine(
 
   if (bestSa.stations !== currentConfig.saStations || bestSa.people !== currentConfig.saPeople) {
     actions.push(
-      `Parallel Subassembly Cells: Set to ${bestSa.stations} cells (previously ${currentConfig.saStations}).`
+      `Parallel Subassembly Cells: Optimized to ${bestSa.stations} concurrent workstations (previously ${currentConfig.saStations}).`
     );
     actions.push(
-      `Technicians Per SA Cell: Set to ${bestSa.people} technicians/cell (previously ${currentConfig.saPeople} techs/cell). Total subassembly crew: ${bestSa.stations * bestSa.people}.`
+      `Technicians Per SA Cell: Kept strictly minimal at ${bestSa.people} technician/cell (${optimizedSaBuffers} material buffers staged).`
     );
   } else {
     actions.push(
-      `Parallel Subassembly Cells: Maintained at ${bestSa.stations} cells with ${bestSa.people} technicians/cell.`
+      `Parallel Subassembly Cells: Maintained at ${bestSa.stations} concurrent workstations with ${bestSa.people} technician/cell (${optimizedSaBuffers} material buffers staged).`
     );
   }
 
@@ -835,7 +854,7 @@ export function optimizeProductionLine(
     );
   } else {
     actions.push(
-      `Schedule Warning: Output requires ${workingDaysRequired.toFixed(1)} working days vs ${workingDaysAvailable} scheduled. Parameter change recommendations provided below.`
+      `Schedule Warning: Output requires ${workingDaysRequired.toFixed(1)} working days vs ${workingDaysAvailable} scheduled. Overtime & Emergency Recovery Catch-Up Planner activated below.`
     );
   }
 
@@ -846,13 +865,15 @@ export function optimizeProductionLine(
   );
 
   const explanation = isCompletedBeforeWorkingDays
-    ? `Optimized specifically for Monthly Target Requirement of ${currentConfig.demand} machines. Output is completed before Working Days Per Month: Finished on Day ${workingDaysRequired.toFixed(1)} of ${workingDaysAvailable} Working Days (+${daysMargin.toFixed(1)} days ahead of schedule, 100% completion). Preserves your active Multi-Variant Product Mix (${activeVariants.length} models) and balances work content across stations by adjusting Operators Assigned (${optimizedStations.map((s, i) => `S${i + 1}:${s.people}`).join(', ')}), Parallel Subassembly Cells (${bestSa.stations}), and Technicians Per SA Cell (${bestSa.people}). Expected throughput: ${testSim.completedCount} units (${testSim.monteCarlo.pMeetTarget}% on-time probability).`
-    : `Monthly Target Requirement of ${currentConfig.demand} machines cannot be completed within ${workingDaysAvailable} Working Days solely by adjusting operators and subassembly cells. It requires ${workingDaysRequired.toFixed(1)} working days (${Math.abs(daysMargin).toFixed(1)} days deficit; only ${testSim.completedCount} of ${currentConfig.demand} units finish before month-end). Parameter change recommendations are detailed below to achieve full demand.`;
+    ? `Optimized specifically for Monthly Target Requirement of ${currentConfig.demand} machines. Output is completed before Working Days Per Month: Finished on Day ${workingDaysRequired.toFixed(1)} of ${workingDaysAvailable} Working Days (+${daysMargin.toFixed(1)} days ahead of schedule, 100% completion). Preserves your active Multi-Variant Product Mix (${activeVariants.length} models) and balances work content across stations by adjusting Operators Assigned (${optimizedStations.map((s, i) => `S${i + 1}:${s.people}`).join(', ')}), Parallel Subassembly Cells (${bestSa.stations} concurrent workstations), Material Buffers Per SA Cell (${optimizedSaBuffers} buffers), and keeping Technicians Per SA Cell minimal (${bestSa.people} tech/cell). Expected throughput: ${testSim.completedCount} units (${testSim.monteCarlo.pMeetTarget}% on-time probability).`
+    : `Monthly Target Requirement of ${currentConfig.demand} machines cannot be completed within ${workingDaysAvailable} Working Days solely by adjusting operators and subassembly cells with minimum technicians. It requires ${workingDaysRequired.toFixed(1)} working days (${Math.abs(daysMargin).toFixed(1)} days deficit; only ${testSim.completedCount} of ${currentConfig.demand} units finish before month-end). Overtime & Emergency Recovery Catch-Up Planner recommendation is detailed below to achieve full demand on schedule.`;
 
   return {
     optimizedStations,
     optimizedSaStations: bestSa.stations,
     optimizedSaPeople: bestSa.people,
+    optimizedSaBuffers,
+    recoveryPlan,
     targetDemand: currentConfig.demand,
     estimatedOutput: testSim.completedCount,
     confidenceScore: testSim.monteCarlo.pMeetTarget,
